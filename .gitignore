@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+env/
+venv/
+.venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Byte-compiled / artifacts
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+
+# PyInstaller
+build/
+dist/
+*.spec
+Output/
+localpycs/
+
+# IDEs
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints
+
+# Logs
+*.log
+
+# Config/user data that shouldn't be committed
+config.ini
+*.ini
+*.db
+*.sqlite
+# If you sometimes include mapping file in repo, ignore user copies:
+mapeamento_programas.csv
+resources/*.csv
+
+# Coverage
+htmlcov/
+.coverage
