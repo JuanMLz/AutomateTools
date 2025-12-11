@@ -54,3 +54,16 @@ resources/*.csv
 # Coverage
 htmlcov/
 .coverage
+
+# Build / Distribuição / Artifacts
+dist/
+build/
+Output/
+localpycs/
+*.pyz
+*.exe
+*.dll
+*.so
+warn-*.txt
+xref-*.html
+*.toc
