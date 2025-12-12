@@ -86,18 +86,22 @@ def _normalize_time_to_hhmm(value):
     # último recurso: pega primeiros 5 caracteres (ruim, mas evita crash)
     return (s + "00000")[:5]
 
-def get_weekday_key(row):
+def get_weekday_key(row, day_index_map=None):
     """
-    Gera chave baseada em Dia da Semana + HH:MM.
+    Gera chave baseada em Índice Sequencial de Dia (0-6: sábado-sexta) + HH:MM.
     Aceita 'Data' como string/objeto e 'Horario' em vários formatos.
+    Se day_index_map for fornecido, usa o mapa para converter Data → índice.
     """
     try:
-        dt = pd.to_datetime(row['Data'], dayfirst=True, errors='coerce')
-        if pd.isna(dt):
-            return f"ERR_{row.get('Data')}_{row.get('Horario')}"
-        weekday = dt.weekday()
+        data_str = str(row.get('Data', ''))
+        if day_index_map and data_str in day_index_map:
+            day_index = day_index_map[data_str]
+        else:
+            # fallback: não temos mapa, assume índice 0
+            day_index = 0
+        
         time_str = _normalize_time_to_hhmm(row.get('Horario', ""))
-        return f"{weekday}_{time_str}"
+        return f"{day_index}_{time_str}"
     except Exception:
         return f"ERR_{row.get('Data')}_{row.get('Horario')}"
 
@@ -136,15 +140,23 @@ def analyze(nova_path, antiga_path, out_path="grade_diff_report.xlsx", sample_li
     df_novo['Data'] = df_novo['Data'].astype(str)
     df_antigo['Data'] = df_antigo['Data'].astype(str)
 
-    # Normaliza Horario na própria tabela para consistência (coluna temporária)
+    # Cria mapas de índice de dia (0-6: sábado-sexta) baseado na ordem de aparição das datas
+    unique_dates_novo = df_novo['Data'].unique()
+    day_index_map_novo = {date_str: idx for idx, date_str in enumerate(unique_dates_novo)}
+    
+    unique_dates_antigo = df_antigo['Data'].unique()
+    day_index_map_antigo = {date_str: idx for idx, date_str in enumerate(unique_dates_antigo)}
+
+    # Normaliza Horario na própria tabela para consistência
     df_novo['Horario_norm'] = df_novo['Horario'].apply(_normalize_time_to_hhmm)
     df_antigo['Horario_norm'] = df_antigo['Horario'].apply(_normalize_time_to_hhmm)
     # redefine a coluna Horario usada para chave (manter o original também)
     df_novo['Horario'] = df_novo['Horario_norm']
     df_antigo['Horario'] = df_antigo['Horario_norm']
 
-    df_novo['chave'] = df_novo.apply(get_weekday_key, axis=1)
-    df_antigo['chave'] = df_antigo.apply(get_weekday_key, axis=1)
+    # Gera chaves com mapa de índices de dia
+    df_novo['chave'] = df_novo.apply(lambda row: get_weekday_key(row, day_index_map_novo), axis=1)
+    df_antigo['chave'] = df_antigo.apply(lambda row: get_weekday_key(row, day_index_map_antigo), axis=1)
 
     # Normaliza programas padronizados (do antigo) e novos
     if 'Programa_Padronizado' in df_antigo.columns:
@@ -218,6 +230,6 @@ if __name__ == '__main__':
     else:
         # caminhos de exemplo (substitua se desejar)
         nova = r"C:\Users\juan.lopes\Downloads\01_11_2025_ate_07_11_2025_grade (2).xlsx"
-        antiga = r"C:\Users\juan.lopes\Downloads\teste15 - comparativa.xlsx"
+        antiga = r"C:\Users\juan.lopes\Downloads\teste21.xlsx"
         out = "grade_diff_report.xlsx"
     analyze(nova, antiga, out)

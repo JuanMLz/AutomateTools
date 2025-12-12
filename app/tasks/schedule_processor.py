@@ -41,29 +41,31 @@ def _extract_date_from_pdf(pdf_path):
 
 def _get_weekday_key(row):
     """
-    Gera chave baseada em Dia da Semana + HH:MM.
-    Aceita 'Data' como string/objeto e 'Horario' como string, time, Timestamp.
+    Gera chave baseada em Dia da Semana Real (0=seg, 1=ter, ..., 6=dom) + HH:MM.
+    Usa datetime.weekday() para garantir consistência independente da ordem das datas.
+    Aceita 'Data' como string (DD/MM/YYYY) ou objeto datetime.
     """
     try:
-        # garante objeto datetime a partir da coluna Data
-        dt = pd.to_datetime(row['Data'], dayfirst=True)
-
         # Normaliza horário para HH:MM
         horario_raw = row.get('Horario', "")
-        # Se for pandas Timestamp / datetime
         if hasattr(horario_raw, 'hour') and hasattr(horario_raw, 'minute'):
             time_str = f"{int(horario_raw.hour):02}:{int(horario_raw.minute):02}"
         else:
-            # fallback: stringar e pegar os dois primeiros componentes HH:MM
             s = str(horario_raw).strip()
-            # tenta extrair HH:MM via regex (aceita HH:MM(:SS)?)
             m = re.search(r'(\d{1,2}:\d{2})', s)
-            if m:
-                time_str = m.group(1)
-            else:
-                # última chance: fatia segura
-                time_str = s[:5]
-        weekday = dt.weekday()  # 0 = Segunda
+            time_str = m.group(1) if m else s[:5]
+        
+        # Converte data para datetime e extrai weekday (0=seg, ..., 6=dom)
+        data_raw = row.get('Data', '')
+        if isinstance(data_raw, str):
+            try:
+                data_obj = pd.to_datetime(data_raw, format='%d/%m/%Y')
+            except:
+                data_obj = pd.to_datetime(data_raw)
+        else:
+            data_obj = pd.to_datetime(data_raw)
+        
+        weekday = data_obj.weekday()  # 0=seg, 1=ter, ..., 6=dom
         return f"{weekday}_{time_str}"
     except Exception:
         return f"ERR_{row.get('Data')}_{row.get('Horario')}"
@@ -177,7 +179,6 @@ def extract_and_clean_from_pdfs(pdf_paths):
         if df_extracted.empty: return None, "Erro: PDFs vazios ou ilegíveis."
 
         # Ordenação Cronológica Rigorosa
-        # Ordenação Cronológica Rigorosa
         df_extracted['temp_data'] = pd.to_datetime(df_extracted['Data'], format='%d/%m/%Y', errors='coerce')
         # Converte Horario para datetime e extrai apenas hora e minuto
         df_extracted['temp_hora_dt'] = pd.to_datetime(df_extracted['Horario'], format='%H:%M', errors='coerce')
@@ -199,8 +200,11 @@ def extract_and_clean_from_pdfs(pdf_paths):
         # Aplica Mapeamento
         df_extracted['Programa_Padronizado'] = df_extracted['Programa_Bruto'].replace(mapping_dict)
         
-        # Retorna apenas colunas úteis
-        return df_extracted[['Data', 'Horario', 'Programa_Padronizado']], None
+        # Gera chave usando weekday real (0=seg, ..., 6=dom) + HH:MM
+        df_extracted['chave'] = df_extracted.apply(lambda row: _get_weekday_key(row), axis=1)
+        
+        # Retorna com a chave incluída (útil para debugging)
+        return df_extracted[['Data', 'Horario', 'Programa_Bruto', 'Programa_Padronizado', 'chave']], None
     except Exception as e:
         return None, f"Erro na extração: {e}"
 
@@ -287,78 +291,120 @@ def generate_epg_from_simple_schedule(simple_schedule_df, epg_output_path):
         return f"Erro EPG: {e}"
 
 def generate_comparison_report(clean_schedule_df, excel_anterior_path, output_path):
-    """Gera relatório comparativo usando a planilha anterior como Template."""
+    """
+    Gera relatório comparativo usando a planilha anterior como Template.
+    Compara registros pela chave weekday_HH:MM (ex: "0_09:00" = segunda 09:00).
+    """
     try:
         df_novo = clean_schedule_df.copy()
 
-        # 1. Tenta ler o Template
+        # 1. Ler a planilha anterior
         try:
             df_antigo = pd.read_excel(excel_anterior_path, header=0)
-            if 'Data' not in df_antigo.columns: raise ValueError()
+            if 'Data' not in df_antigo.columns:
+                raise ValueError("Coluna 'Data' não encontrada com header=0")
         except:
-            df_antigo = pd.read_excel(excel_anterior_path, header=2)
+            try:
+                df_antigo = pd.read_excel(excel_anterior_path, header=2)
+                if 'Data' not in df_antigo.columns:
+                    raise ValueError("Coluna 'Data' não encontrada com header=2")
+            except Exception as e:
+                return f"Erro ao ler arquivo anterior: {e}"
 
-        # Limpeza de colunas do Template
+        # Limpeza de colunas
         df_antigo = df_antigo.loc[:, ~df_antigo.columns.str.contains('^Unnamed')]
         df_antigo.columns = df_antigo.columns.str.strip()
         
+        # Renomeia coluna de programa se necessário
         if 'Programa' in df_antigo.columns:
             df_antigo.rename(columns={'Programa': 'Programa_Padronizado'}, inplace=True)
 
-        # 2. Configura Chaves de Comparação
-        df_novo['Data'] = df_novo['Data'].astype(str)
-        df_novo['chave'] = df_novo.apply(_get_weekday_key, axis=1)
-        
+        # Normaliza Data para string
         df_antigo['Data'] = df_antigo['Data'].astype(str)
-        df_antigo['chave'] = df_antigo.apply(_get_weekday_key, axis=1)
-
-        # 3. Biblioteca de Metadados (Sinopses antigas)
-        db_sinopses = df_antigo.drop_duplicates(subset=['Programa_Padronizado'], keep='last')
-        mapa_antigo = pd.Series(df_antigo.Programa_Padronizado.values, index=df_antigo.chave).to_dict()
-
-        colunas_extras = [c for c in df_antigo.columns if c not in ['Data', 'Horario', 'Programa_Padronizado', 'chave', 'Status']]
         
-        # 4. Processamento dos Registros
+        # Normaliza Horario para HH:MM (pode vir em vários formatos do Excel anterior)
+        def _normalize_time(val):
+            if pd.isna(val):
+                return "00:00"
+            if hasattr(val, 'hour') and hasattr(val, 'minute'):
+                return f"{int(val.hour):02}:{int(val.minute):02}"
+            s = str(val).strip()
+            m = re.search(r'(\d{1,2}:\d{2})', s)
+            return m.group(1) if m else s[:5]
+        
+        df_antigo['Horario'] = df_antigo['Horario'].apply(_normalize_time)
+        
+        # Gera chaves para ambas as planilhas (weekday + horário)
+        df_novo['chave'] = df_novo.apply(lambda row: _get_weekday_key(row), axis=1)
+        df_antigo['chave'] = df_antigo.apply(lambda row: _get_weekday_key(row), axis=1)
+
+        # Cria mapa de consulta: chave → programa da planilha anterior
+        # Em caso de duplicate (mesma hora em dias diferentes), pega última ocorrência
+        mapa_antigo = df_antigo.drop_duplicates(subset=['chave'], keep='last').set_index('chave')['Programa_Padronizado'].to_dict()
+
+        # Cria mapa de metadados (sinopses, diretores, etc) a partir da planilha anterior
+        db_metadados = df_antigo.drop_duplicates(subset=['Programa_Padronizado'], keep='last').set_index('Programa_Padronizado').to_dict()
+        
+        # Lista de colunas extras (qualquer coluna que não seja as principais)
+        colunas_principais = {'Data', 'Horario', 'Programa_Padronizado', 'chave', 'Status', 'Programa_Bruto'}
+        colunas_extras = [c for c in df_antigo.columns if c not in colunas_principais]
+
+        # 2. Processar registros: comparar novo vs antigo
         registros = []
         for _, row in df_novo.iterrows():
+            chave = row['chave']
+            prog_novo = row['Programa_Padronizado']
+            prog_antigo = mapa_antigo.get(chave)
+            
+            # Determina status
+            if prog_antigo is None:
+                status = 'NOVO'
+            elif prog_novo != prog_antigo:
+                status = 'ALTERADO'
+            else:
+                status = 'SEM MUDANÇA'
+            
+            # Monta registro
             item = {
-                'Data': row['Data'], 'Horario': row['Horario'], 'Programa': row['Programa_Padronizado'],
-                'Status': 'SEM MUDANÇA'
+                'Data': row['Data'],
+                'Horario': row['Horario'],
+                'Programa': prog_novo,
+                'Status': status
             }
             
-            # Recupera dados extras (Sinopse, etc)
-            dados = db_sinopses[db_sinopses['Programa_Padronizado'] == item['Programa']]
+            # Adiciona metadados (sinopse, diretor, etc) se existirem
             for col in colunas_extras:
-                val = dados.iloc[0][col] if not dados.empty else ""
-                item[col] = val if pd.notna(val) else ""
-
-            # Verifica Mudanças
-            prog_antigo = mapa_antigo.get(row['chave'])
-            if not prog_antigo: item['Status'] = 'NOVO'
-            elif item['Programa'] != prog_antigo: item['Status'] = 'ALTERADO'
+                item[col] = db_metadados.get(col, {}).get(prog_novo, "")
             
             registros.append(item)
 
-        # 5. Escrita Cirúrgica (OpenPyXL)
+        # 3. Escrever no Excel com formatação
         wb = load_workbook(excel_anterior_path)
         ws = wb.active
         
         fill_green = PatternFill("solid", fgColor="C6EFCE")
         fill_yellow = PatternFill("solid", fgColor="FFFF00")
-        border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+        border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
         align = Alignment(horizontal='left', vertical='center')
 
+        # Limpa dados antigos (linhas de dados começam em linha 4)
         start_row = 4
-        ws.delete_rows(start_row, amount=(ws.max_row + 100)) # Limpa dados antigos
+        ws.delete_rows(start_row, amount=(ws.max_row + 100))
 
+        # Escreve novos registros
+        cols_order = ['Data', 'Horario', 'Programa'] + colunas_extras
         curr_row = start_row
         last_date = None
-        cols_order = ['Data', 'Horario', 'Programa'] + colunas_extras
 
         for reg in registros:
-            # Linha Amarela (Separador de Dia)
+            # Insere linha amarela entre datas diferentes
             if last_date and reg['Data'] != last_date:
-                for c in range(2, len(cols_order) + 3): # Col B até fim
+                for c in range(2, len(cols_order) + 3):
                     cell = ws.cell(curr_row, c)
                     cell.fill = fill_yellow
                     cell.border = border
@@ -368,13 +414,14 @@ def generate_comparison_report(clean_schedule_df, excel_anterior_path, output_pa
             last_date = reg['Data']
             is_changed = reg['Status'] in ['NOVO', 'ALTERADO']
 
-            # Escreve Dados
+            # Escreve dados da linha
             for i, col in enumerate(cols_order):
-                cell = ws.cell(curr_row, i + 2) # +2 offset (Col A vazia)
+                cell = ws.cell(curr_row, i + 2)
                 cell.value = reg.get(col, "")
                 cell.border = border
                 cell.alignment = align
-                if is_changed: cell.fill = fill_green
+                if is_changed:
+                    cell.fill = fill_green
             
             curr_row += 1
 
