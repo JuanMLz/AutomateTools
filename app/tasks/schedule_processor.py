@@ -41,21 +41,32 @@ def _extract_date_from_pdf(pdf_path):
 
 def _get_weekday_key(row):
     """
-    Gera uma chave única para comparação baseada no Dia da Semana e Horário.
-    Ex: '09/12/2025' (Segunda) às '00:00:00' -> Retorna '0_00:00'.
-    Isso permite comparar semanas diferentes (Segunda com Segunda).
+    Gera chave baseada em Dia da Semana + HH:MM.
+    Aceita 'Data' como string/objeto e 'Horario' como string, time, Timestamp.
     """
     try:
+        # garante objeto datetime a partir da coluna Data
         dt = pd.to_datetime(row['Data'], dayfirst=True)
-        weekday = dt.weekday() # 0 = Segunda, 6 = Domingo
-        
-        # Pega apenas HH:MM para evitar erros com segundos (00:00:00 vs 00:00)
-        raw_time = str(row['Horario']).strip()
-        time_str = raw_time[:5] 
-        
+
+        # Normaliza horário para HH:MM
+        horario_raw = row.get('Horario', "")
+        # Se for pandas Timestamp / datetime
+        if hasattr(horario_raw, 'hour') and hasattr(horario_raw, 'minute'):
+            time_str = f"{int(horario_raw.hour):02}:{int(horario_raw.minute):02}"
+        else:
+            # fallback: stringar e pegar os dois primeiros componentes HH:MM
+            s = str(horario_raw).strip()
+            # tenta extrair HH:MM via regex (aceita HH:MM(:SS)?)
+            m = re.search(r'(\d{1,2}:\d{2})', s)
+            if m:
+                time_str = m.group(1)
+            else:
+                # última chance: fatia segura
+                time_str = s[:5]
+        weekday = dt.weekday()  # 0 = Segunda
         return f"{weekday}_{time_str}"
     except Exception:
-        return f"ERR_{row['Data']}_{row['Horario']}"
+        return f"ERR_{row.get('Data')}_{row.get('Horario')}"
 
 def _extract_raw_data_from_pdfs(pdf_paths):
     """Lê as coordenadas X/Y do PDF para separar Horário de Programa."""
@@ -98,6 +109,60 @@ def _extract_raw_data_from_pdfs(pdf_paths):
                 
     return pd.DataFrame(all_schedule_data)
 
+def find_unmapped_programs(pdf_paths=None, df_extracted=None):
+    """
+    Retorna (unmapped_list, None) ou (None, mensagem_de_erro).
+    Aceita `df_extracted` (DataFrame) ou `pdf_paths` (lista).
+    Lida com DataFrames que contenham 'Programa_Bruto' OU 'Programa_Padronizado'.
+    Retorna nomes originais (brutos quando disponíveis) para exibição no editor.
+    """
+    mapping_dict, err = mapping_manager.load_mapping_as_dict()
+    if err:
+        return None, err
+
+    try:
+        # Obter dataframe de origem
+        if df_extracted is None:
+            if not pdf_paths:
+                return [], None
+            df_raw = _extract_raw_data_from_pdfs(pdf_paths)
+        else:
+            df_raw = df_extracted.copy()
+
+        if df_raw is None or df_raw.empty:
+            return [], None
+
+        # Normalização leve: remove acentos, espaços extras e lower
+        def _norm(s):
+            if s is None:
+                return ""
+            s = str(s).strip()
+            s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('utf-8')
+            s = re.sub(r'\s+', ' ', s)
+            return s.lower()
+
+        # Dois cenários:
+        # A) Temos 'Programa_Bruto' => comparamos contra as chaves (Nome_do_PDF) do mapping
+        if 'Programa_Bruto' in df_raw.columns:
+            mapped_keys_norm = { _norm(k) for k in mapping_dict.keys() if pd.notna(k) }
+            unique_raw = pd.Series(df_raw['Programa_Bruto'].astype(str).unique())
+            unmapped = [raw for raw in unique_raw if _norm(raw) not in mapped_keys_norm]
+            return unmapped, None
+
+        # B) Temos apenas 'Programa_Padronizado' (output já com o replace aplicado)
+        #    Nesse caso, assumimos que valores que NÃO aparecem em mapping.values() são não-mapeados.
+        if 'Programa_Padronizado' in df_raw.columns:
+            mapped_values_norm = { _norm(v) for v in mapping_dict.values() if pd.notna(v) }
+            unique_pad = pd.Series(df_raw['Programa_Padronizado'].astype(str).unique())
+            # itens cujo padronizado não aparece entre valores mapeados => provavelmente não mapeados
+            unmapped = [p for p in unique_pad if _norm(p) not in mapped_values_norm]
+            return unmapped, None
+
+        # Se nenhuma coluna esperada existir, devolve erro explicativo
+        return None, "Erro ao detectar programas não mapeados: colunas esperadas ausentes ('Programa_Bruto' ou 'Programa_Padronizado')."
+
+    except Exception as e:
+        return None, f"Erro ao detectar programas não mapeados: {e}"
 # ======================================================================
 # == 2. FUNÇÕES PRINCIPAIS (Tasks)                                    ==
 # ======================================================================
@@ -112,10 +177,24 @@ def extract_and_clean_from_pdfs(pdf_paths):
         if df_extracted.empty: return None, "Erro: PDFs vazios ou ilegíveis."
 
         # Ordenação Cronológica Rigorosa
+        # Ordenação Cronológica Rigorosa
         df_extracted['temp_data'] = pd.to_datetime(df_extracted['Data'], format='%d/%m/%Y', errors='coerce')
-        df_extracted['temp_hora'] = pd.to_datetime(df_extracted['Horario'], format='%H:%M', errors='coerce').dt.time
+        # Converte Horario para datetime e extrai apenas hora e minuto
+        df_extracted['temp_hora_dt'] = pd.to_datetime(df_extracted['Horario'], format='%H:%M', errors='coerce')
+        # Se não parseou com %H:%M, tenta com %H:%M:%S
+        mask_na = df_extracted['temp_hora_dt'].isna()
+        if mask_na.any():
+            df_extracted.loc[mask_na, 'temp_hora_dt'] = pd.to_datetime(df_extracted.loc[mask_na, 'Horario'], format='%H:%M:%S', errors='coerce')
+
+        # Agora temos timestamps — ordena por data+hora
+        df_extracted['temp_hora'] = df_extracted['temp_hora_dt'].dt.time
         df_extracted.sort_values(by=['temp_data', 'temp_hora'], inplace=True)
-        df_extracted.drop(columns=['temp_data', 'temp_hora'], inplace=True)
+
+        # Normaliza a coluna Horario para string 'HH:MM' (substitui a original)
+        df_extracted['Horario'] = df_extracted['temp_hora'].apply(lambda t: f"{t.hour:02}:{t.minute:02}" if pd.notna(t) else "")
+
+        # remove colunas temporárias usadas no processo de ordenação
+        df_extracted.drop(columns=['temp_hora_dt', 'temp_hora', 'temp_data'], inplace=True, errors='ignore')
 
         # Aplica Mapeamento
         df_extracted['Programa_Padronizado'] = df_extracted['Programa_Bruto'].replace(mapping_dict)

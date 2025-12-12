@@ -191,7 +191,7 @@ class GradeCreatorWidget(QWidget):
 
         # Busca a lista de programas não mapeados
         # Nota: Essa função find_unmapped_programs já está otimizada para ser rápida.
-        unmapped_programs, map_error = find_unmapped_programs(self.selected_pdf_files)
+        unmapped_programs, map_error = find_unmapped_programs(df_extracted=df_extracted)
 
         if map_error:
             self._unlock_ui()
