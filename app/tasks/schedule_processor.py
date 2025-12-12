@@ -170,54 +170,77 @@ def find_unmapped_programs(pdf_paths=None, df_extracted=None):
 # ======================================================================
 
 def extract_and_clean_from_pdfs(pdf_paths):
-    """Extrai dados, ordena cronologicamente e aplica o De-Para."""
-    mapping_dict, error = mapping_manager.load_mapping_as_dict()
+    """Extrai dados, ordena cronologicamente e aplica o De-Para (Blindado)."""
+    
+    # 1. Carrega o dicionário
+    raw_mapping, error = mapping_manager.load_mapping_as_dict()
     if error: return None, error
+
+    # BLINDAGEM DO MAPEAMENTO: Remove espaços das chaves do dicionário
+    # Ex: " Programa X " vira "Programa X" no índice de busca
+    mapping_dict = {k.strip(): v for k, v in raw_mapping.items()}
 
     try:
         df_extracted = _extract_raw_data_from_pdfs(pdf_paths)
         if df_extracted.empty: return None, "Erro: PDFs vazios ou ilegíveis."
 
-        # Ordenação Cronológica Rigorosa
+        # 2. Ordenação Cronológica (Mantida igual)
         df_extracted['temp_data'] = pd.to_datetime(df_extracted['Data'], format='%d/%m/%Y', errors='coerce')
-        # Converte Horario para datetime e extrai apenas hora e minuto
         df_extracted['temp_hora_dt'] = pd.to_datetime(df_extracted['Horario'], format='%H:%M', errors='coerce')
-        # Se não parseou com %H:%M, tenta com %H:%M:%S
         mask_na = df_extracted['temp_hora_dt'].isna()
         if mask_na.any():
             df_extracted.loc[mask_na, 'temp_hora_dt'] = pd.to_datetime(df_extracted.loc[mask_na, 'Horario'], format='%H:%M:%S', errors='coerce')
 
-        # Agora temos timestamps — ordena por data+hora
         df_extracted['temp_hora'] = df_extracted['temp_hora_dt'].dt.time
         df_extracted.sort_values(by=['temp_data', 'temp_hora'], inplace=True)
 
-        # Normaliza a coluna Horario para string 'HH:MM' (substitui a original)
         df_extracted['Horario'] = df_extracted['temp_hora'].apply(lambda t: f"{t.hour:02}:{t.minute:02}" if pd.notna(t) else "")
-
-        # remove colunas temporárias usadas no processo de ordenação
         df_extracted.drop(columns=['temp_hora_dt', 'temp_hora', 'temp_data'], inplace=True, errors='ignore')
 
-        # Aplica Mapeamento
+        # 3. BLINDAGEM DA EXTRAÇÃO: Limpeza rigorosa do nome bruto
+        # Remove espaços do início/fim e converte para string
+        df_extracted['Programa_Bruto'] = df_extracted['Programa_Bruto'].astype(str).str.strip()
+        
+        # Remove espaços duplos no meio do nome (ex: "Jornal  Hoje" -> "Jornal Hoje")
+        df_extracted['Programa_Bruto'] = df_extracted['Programa_Bruto'].str.replace(r'\s+', ' ', regex=True)
+
+        # 4. Aplica Mapeamento (Agora com dados limpos vs chaves limpas)
         df_extracted['Programa_Padronizado'] = df_extracted['Programa_Bruto'].replace(mapping_dict)
         
-        # Gera chave usando weekday real (0=seg, ..., 6=dom) + HH:MM
+        # Gera chave
         df_extracted['chave'] = df_extracted.apply(lambda row: _get_weekday_key(row), axis=1)
         
-        # Retorna com a chave incluída (útil para debugging)
         return df_extracted[['Data', 'Horario', 'Programa_Bruto', 'Programa_Padronizado', 'chave']], None
     except Exception as e:
-        return None, f"Erro na extração: {e}"
+        import traceback
+        return None, f"Erro na extração: {e} | {traceback.format_exc()}"
 
 def generate_epg_from_simple_schedule(simple_schedule_df, epg_output_path):
-    """Gera o Excel Visual (EPG) com células mescladas."""
+    """
+    Gera o Excel Visual (EPG) com células mescladas e aba de Database.
+    INTEGRAÇÃO: Atualiza o epg_database.csv com novos títulos encontrados.
+    """
     try:
+        # Importação sob demanda para evitar ciclos
+        from .epg_database_manager import epg_manager
+        
         df = simple_schedule_df.copy()
         
-        # Preparação de Datas e Horários
+        # 1. Preparação de Datas e Horários
         df['inicio'] = pd.to_datetime(df['Data'] + ' ' + df['Horario'], format='%d/%m/%Y %H:%M')
         df['titulo_slug'] = df['Programa_Padronizado'].apply(_slugify)
         df = df.sort_values(by='inicio').reset_index(drop=True)
         
+        # === ATUALIZAÇÃO DO BANCO DE DADOS ===
+        # Extrai lista de títulos e slugs para verificar se são novos
+        # Usamos drop_duplicates para processar cada programa apenas uma vez
+        unique_progs = df[['titulo_slug', 'Programa_Padronizado']].drop_duplicates()
+        slugs_list = unique_progs['titulo_slug'].tolist()
+        titles_list = unique_progs['Programa_Padronizado'].tolist()
+        
+        added_count = epg_manager.update_with_new_programs(slugs_list, titles_list)
+        # =====================================
+
         datas = sorted(df['inicio'].dt.date.unique())
         colunas_datas = [d.strftime('%d/%m/%Y') for d in datas]
         
@@ -228,16 +251,13 @@ def generate_epg_from_simple_schedule(simple_schedule_df, epg_output_path):
         grade_df = pd.DataFrame(index=indice_horarios, columns=colunas_datas)
         grade_df.index.name = 'BRT'
 
-        # Preenche a Grade
+        # Preenche a Grade Visual
         for _, row in df.iterrows():
             data_str = row['inicio'].strftime('%d/%m/%Y')
-            
-            # Arredondamento para 5 min
             h, m = row['inicio'].hour, row['inicio'].minute
             m_round = 5 * round(m / 5)
-            if m_round == 60:
-                h += 1; m_round = 0
-                if h == 24: h = 0
+            if m_round == 60: h += 1; m_round = 0; 
+            if h == 24: h = 0
             
             time_str = f"{h:02}:{m_round:02}:00"
             idx_inicio = pd.to_datetime(time_str, format='%H:%M:%S')
@@ -245,8 +265,13 @@ def generate_epg_from_simple_schedule(simple_schedule_df, epg_output_path):
             if data_str in grade_df.columns and idx_inicio in grade_df.index:
                 grade_df.loc[idx_inicio, data_str] = row['titulo_slug']
 
-        # Escrita com XlsxWriter
+        # Carrega o banco atualizado para salvar na aba 2
+        df_epg_db = epg_manager.load_db()
+
+        # Escrita com XlsxWriter (2 Abas)
         with pd.ExcelWriter(epg_output_path, engine='xlsxwriter') as writer:
+            
+            # --- ABA 1: SCHEDULE ---
             grade_df.index = grade_df.index.strftime('%H:%M')
             grade_df.to_excel(writer, sheet_name='Schedule')
             
@@ -268,141 +293,140 @@ def generate_epg_from_simple_schedule(simple_schedule_df, epg_output_path):
                     val = grade_df.iloc[row_num, col_num]
                     
                     if pd.notna(val) and val != "":
-                        # Fecha bloco anterior
                         if start_row != -1:
                             end_row = excel_row - 1
                             if end_row > start_row:
                                 ws.merge_range(start_row, excel_col, end_row, excel_col, last_txt, merge_fmt)
                             else:
                                 ws.write(start_row, excel_col, last_txt, merge_fmt)
-                        
                         start_row = excel_row
                         last_txt = val
                     
-                    # Fecha último bloco do dia
                     if row_num == len(grade_df) - 1 and start_row != -1:
                         if excel_row > start_row:
                             ws.merge_range(start_row, excel_col, excel_row, excel_col, last_txt, merge_fmt)
                         else:
                             ws.write(start_row, excel_col, last_txt, merge_fmt)
-                            
-        return f"Sucesso! EPG salvo em '{epg_output_path}'"
+            
+            # --- ABA 2: EPG (DATABASE) ---
+            df_epg_db.to_excel(writer, sheet_name='EPG', index=False)
+            ws_epg = writer.sheets['EPG']
+            ws_epg.set_column('A:A', 25) # Unique ID
+            ws_epg.set_column('B:B', 30) # Title
+            ws_epg.set_column('H:H', 40) # Short Desc
+            ws_epg.set_column('I:I', 60) # Long Desc
+
+        msg_extra = f" (+{added_count} novos programas cadastrados)" if added_count > 0 else ""
+        return f"Sucesso! EPG salvo em '{epg_output_path}'{msg_extra}"
+
     except Exception as e:
-        return f"Erro EPG: {e}"
+        import traceback
+        return f"Erro EPG: {e} | {traceback.format_exc()}"
 
 def generate_comparison_report(clean_schedule_df, excel_anterior_path, output_path):
     """
     Gera relatório comparativo usando a planilha anterior como Template.
-    Compara registros pela chave weekday_HH:MM (ex: "0_09:00" = segunda 09:00).
+    BLINDAGEM: Normaliza strings (remove espaços) antes de comparar.
     """
     try:
         df_novo = clean_schedule_df.copy()
 
-        # 1. Ler a planilha anterior
+        # 1. Leitura Inteligente do Template
         try:
             df_antigo = pd.read_excel(excel_anterior_path, header=0)
-            if 'Data' not in df_antigo.columns:
-                raise ValueError("Coluna 'Data' não encontrada com header=0")
+            if 'Data' not in df_antigo.columns: raise ValueError()
         except:
-            try:
-                df_antigo = pd.read_excel(excel_anterior_path, header=2)
-                if 'Data' not in df_antigo.columns:
-                    raise ValueError("Coluna 'Data' não encontrada com header=2")
-            except Exception as e:
-                return f"Erro ao ler arquivo anterior: {e}"
+            df_antigo = pd.read_excel(excel_anterior_path, header=2)
 
-        # Limpeza de colunas
+        # Limpeza de colunas do Template
         df_antigo = df_antigo.loc[:, ~df_antigo.columns.str.contains('^Unnamed')]
         df_antigo.columns = df_antigo.columns.str.strip()
         
-        # Renomeia coluna de programa se necessário
         if 'Programa' in df_antigo.columns:
             df_antigo.rename(columns={'Programa': 'Programa_Padronizado'}, inplace=True)
 
-        # Normaliza Data para string
+        # === BLINDAGEM DO TEMPLATE (Limpeza de Strings) ===
+        # Garante que os nomes no Excel antigo não tenham espaços invisíveis
+        if 'Programa_Padronizado' in df_antigo.columns:
+            df_antigo['Programa_Padronizado'] = df_antigo['Programa_Padronizado'].astype(str).str.strip()
+            df_antigo['Programa_Padronizado'] = df_antigo['Programa_Padronizado'].str.replace(r'\s+', ' ', regex=True)
+        # ==================================================
+
+        # Normaliza Data/Hora
         df_antigo['Data'] = df_antigo['Data'].astype(str)
         
-        # Normaliza Horario para HH:MM (pode vir em vários formatos do Excel anterior)
         def _normalize_time(val):
-            if pd.isna(val):
-                return "00:00"
-            if hasattr(val, 'hour') and hasattr(val, 'minute'):
-                return f"{int(val.hour):02}:{int(val.minute):02}"
+            if pd.isna(val): return "00:00"
+            if hasattr(val, 'hour'): return f"{int(val.hour):02}:{int(val.minute):02}"
             s = str(val).strip()
             m = re.search(r'(\d{1,2}:\d{2})', s)
             return m.group(1) if m else s[:5]
         
         df_antigo['Horario'] = df_antigo['Horario'].apply(_normalize_time)
         
-        # Gera chaves para ambas as planilhas (weekday + horário)
+        # Gera chaves
         df_novo['chave'] = df_novo.apply(lambda row: _get_weekday_key(row), axis=1)
         df_antigo['chave'] = df_antigo.apply(lambda row: _get_weekday_key(row), axis=1)
 
-        # Cria mapa de consulta: chave → programa da planilha anterior
-        # Em caso de duplicate (mesma hora em dias diferentes), pega última ocorrência
-        mapa_antigo = df_antigo.drop_duplicates(subset=['chave'], keep='last').set_index('chave')['Programa_Padronizado'].to_dict()
-
-        # Cria mapa de metadados (sinopses, diretores, etc) a partir da planilha anterior
-        db_metadados = df_antigo.drop_duplicates(subset=['Programa_Padronizado'], keep='last').set_index('Programa_Padronizado').to_dict()
+        # Cria mapas de referência
+        # Pega a última ocorrência para evitar duplicatas de chave
+        df_antigo_unique = df_antigo.drop_duplicates(subset=['chave'], keep='last')
+        mapa_antigo = df_antigo_unique.set_index('chave')['Programa_Padronizado'].to_dict()
         
-        # Lista de colunas extras (qualquer coluna que não seja as principais)
+        # Mapa de Metadados (Sinopses, etc.)
+        df_meta_unique = df_antigo.drop_duplicates(subset=['Programa_Padronizado'], keep='last')
+        db_metadados = df_meta_unique.set_index('Programa_Padronizado').to_dict('index')
+
         colunas_principais = {'Data', 'Horario', 'Programa_Padronizado', 'chave', 'Status', 'Programa_Bruto'}
         colunas_extras = [c for c in df_antigo.columns if c not in colunas_principais]
 
-        # 2. Processar registros: comparar novo vs antigo
+        # 2. Comparação
         registros = []
         for _, row in df_novo.iterrows():
             chave = row['chave']
-            prog_novo = row['Programa_Padronizado']
+            # Garante limpeza também no nome novo (vindo da extração)
+            prog_novo = str(row['Programa_Padronizado']).strip().replace('  ', ' ')
+            
             prog_antigo = mapa_antigo.get(chave)
             
-            # Determina status
-            if prog_antigo is None:
+            # Lógica de Status
+            if not prog_antigo or str(prog_antigo) == 'nan':
                 status = 'NOVO'
             elif prog_novo != prog_antigo:
                 status = 'ALTERADO'
             else:
                 status = 'SEM MUDANÇA'
             
-            # Monta registro
             item = {
-                'Data': row['Data'],
-                'Horario': row['Horario'],
-                'Programa': prog_novo,
-                'Status': status
+                'Data': row['Data'], 'Horario': row['Horario'], 'Programa': prog_novo, 'Status': status
             }
             
-            # Adiciona metadados (sinopse, diretor, etc) se existirem
+            # Recupera Metadados (usando o nome limpo como chave)
+            meta_row = db_metadados.get(prog_novo, {})
             for col in colunas_extras:
-                item[col] = db_metadados.get(col, {}).get(prog_novo, "")
+                val = meta_row.get(col, "")
+                item[col] = val if pd.notna(val) else ""
             
             registros.append(item)
 
-        # 3. Escrever no Excel com formatação
+        # 3. Escrita no Excel (Lógica Visual - Mantida igual)
         wb = load_workbook(excel_anterior_path)
         ws = wb.active
         
         fill_green = PatternFill("solid", fgColor="C6EFCE")
         fill_yellow = PatternFill("solid", fgColor="FFFF00")
-        border = Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')
-        )
+        border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
         align = Alignment(horizontal='left', vertical='center')
 
-        # Limpa dados antigos (linhas de dados começam em linha 4)
         start_row = 4
         ws.delete_rows(start_row, amount=(ws.max_row + 100))
 
-        # Escreve novos registros
-        cols_order = ['Data', 'Horario', 'Programa'] + colunas_extras
         curr_row = start_row
         last_date = None
+        cols_order = ['Data', 'Horario', 'Programa'] + colunas_extras
 
         for reg in registros:
-            # Insere linha amarela entre datas diferentes
+            # Linha Amarela
             if last_date and reg['Data'] != last_date:
                 for c in range(2, len(cols_order) + 3):
                     cell = ws.cell(curr_row, c)
@@ -414,14 +438,12 @@ def generate_comparison_report(clean_schedule_df, excel_anterior_path, output_pa
             last_date = reg['Data']
             is_changed = reg['Status'] in ['NOVO', 'ALTERADO']
 
-            # Escreve dados da linha
             for i, col in enumerate(cols_order):
                 cell = ws.cell(curr_row, i + 2)
                 cell.value = reg.get(col, "")
                 cell.border = border
                 cell.alignment = align
-                if is_changed:
-                    cell.fill = fill_green
+                if is_changed: cell.fill = fill_green
             
             curr_row += 1
 

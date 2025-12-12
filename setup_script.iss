@@ -5,12 +5,12 @@
 ; Cada aplicação deve ter um AppId único. Gere um novo em Tools -> Generate GUID no Inno Setup.
 AppId={{BD09E837-8EAD-4106-B551-BA08B7B0FA3E}
 AppName=AutomateTools
-AppVersion=1.3
+AppVersion=1.4
 AppPublisher=Juan M. Lopes
 DefaultDirName={autopf}\AutomateTools
 DefaultGroupName=AutomateTools
 DisableProgramGroupPage=yes
-OutputBaseFilename=AutomateTools_Setup_v1.3
+OutputBaseFilename=AutomateTools_Setup_v1.4
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
