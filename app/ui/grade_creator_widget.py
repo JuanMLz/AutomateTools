@@ -15,10 +15,6 @@ from app.workers import GradeExtractionWorker, GradeComparisonWorker, EpgGenerat
 # Importe sua classe MappingEditorWidget do local correto (se for arquivo separado)
 # from app.ui.mapping_editor_widget import MappingEditorWidget 
 
-# Se a classe MappingEditorWidget estiver neste arquivo ou colada abaixo, mantenha.
-# Vou assumir que ela está em arquivo separado conforme boas práticas, 
-# mas se não estiver, cole-a aqui antes da classe GradeCreatorWidget.
-
 class GradeCreatorWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -196,9 +192,23 @@ class GradeCreatorWidget(QWidget):
             self._check_and_start_processing('simple')
 
     def _start_simple(self, df):
+        """Gera a planilha simples apenas com as colunas necessárias."""
         self._lock_ui("Gerando Planilha Simples...")
         try:
-            df.to_excel(self.current_output_path, index=False, sheet_name="Grade Limpa")
+            # 1. Seleciona apenas as colunas que o usuário quer ver
+            cols_to_keep = ['Data', 'Horario', 'Programa_Padronizado']
+            
+            # Verifica se as colunas existem antes de filtrar (segurança)
+            existing_cols = [c for c in cols_to_keep if c in df.columns]
+            df_final = df[existing_cols].copy()
+            
+            # 2. Renomeia 'Programa_Padronizado' para 'Programa'
+            if 'Programa_Padronizado' in df_final.columns:
+                df_final.rename(columns={'Programa_Padronizado': 'Programa'}, inplace=True)
+            
+            # 3. Salva
+            df_final.to_excel(self.current_output_path, index=False, sheet_name="Grade Limpa")
+            
             self.status_label.setText(f"Sucesso! Salvo em '{os.path.basename(self.current_output_path)}'")
         except Exception as e:
             self.status_label.setText(f"Erro: {e}")

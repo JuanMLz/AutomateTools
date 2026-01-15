@@ -1,44 +1,45 @@
 # app/tasks/mapping_manager.py
-# Gerenciador de mapeamento, com suporte a executável (PyInstaller) e Config customizada.
-
 import os
 import sys
 import shutil
 import pandas as pd
-from PySide6.QtCore import QStandardPaths
 import configparser
+from PySide6.QtCore import QStandardPaths
 
 class MappingManager:
     def __init__(self, filename="mapeamento_programas.csv", config_filename="config.ini"):
-        # Localização do arquivo de configuração (sempre no AppData do usuário)
-        # Isso garante permissão de escrita sem precisar de Admin
-        self.config_path_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-        self.config_filepath = os.path.join(self.config_path_dir, config_filename)
+        # 1. Define a pasta padrão organizada (AppData/Local/AutomateTools)
+        # Isso garante que todos os arquivos de configuração fiquem juntos
+        app_data_root = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+        self.app_dir = os.path.join(app_data_root, "AutomateTools")
+        
+        # Cria a pasta se não existir
+        os.makedirs(self.app_dir, exist_ok=True)
+
+        # O config.ini também fica dentro dessa pasta organizada
+        self.config_filepath = os.path.join(self.app_dir, config_filename)
         
         # --- Lógica de Configuração ---
         self.config = configparser.ConfigParser()
         self.config.read(self.config_filepath)
         
-        # Procura por um caminho personalizado no config.ini
+        # Verifica se o usuário mudou o local do arquivo CSV no config.ini
         if 'Paths' in self.config and 'mapping_file' in self.config['Paths']:
             self.filepath = self.config['Paths']['mapping_file']
         else:
-            # Se não encontrar, usa o AppData como padrão (padrão seguro)
-            self.filepath = os.path.join(self.config_path_dir, filename)
+            # Se não, usa o padrão DENTRO da pasta AutomateTools
+            self.filepath = os.path.join(self.app_dir, filename)
 
         # --- Lógica de Criação de Template (Blindada para .exe) ---
-        os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
-        
+        # Só copia se o arquivo NÃO existir no destino
         if not os.path.exists(self.filepath):
-            # AQUI ESTÁ O SEGREDO: Descobre onde o programa está rodando
+            # Descobre onde o programa está rodando (se é .exe ou .py)
             if getattr(sys, 'frozen', False):
-                # Se for executável (PyInstaller), usa a pasta temporária do MEIPASS
                 base_path = sys._MEIPASS if hasattr(sys, "_MEIPASS") else os.path.dirname(sys.executable)
             else:
-                # Se for rodando no VSCode/Python normal
                 base_path = os.path.abspath(".")
             
-            # Caminho absoluto para a pasta resources
+            # Caminho do template na pasta resources do projeto
             template_path = os.path.join(base_path, "resources", filename)
 
             if os.path.exists(template_path):
@@ -68,9 +69,16 @@ class MappingManager:
     def load_mapping_as_dict(self):
         filepath_to_load = self.get_mapping_filepath()
         try:
+            # Tenta ler com vírgula (padrão)
             df = pd.read_csv(filepath_to_load)
+            
+            # Se parecer errado (1 coluna), tenta ponto e vírgula (Excel BR)
+            if df.shape[1] < 2:
+                df = pd.read_csv(filepath_to_load, sep=';')
+
             if "Nome_do_PDF" not in df.columns or "Nome_Padronizado" not in df.columns:
-                 return None, "Erro: Arquivo de mapeamento mal formatado."
+                 return {}, None # Retorna vazio se mal formatado, mas não crasha
+            
             df.dropna(subset=["Nome_do_PDF", "Nome_Padronizado"], inplace=True)
             mapping_dict = pd.Series(df.Nome_Padronizado.values, index=df.Nome_do_PDF).to_dict()
             return mapping_dict, None
@@ -89,22 +97,25 @@ class MappingManager:
         
         try:
             df = pd.read_csv(filepath_to_load)
-            # Garante que as colunas existam, mesmo que o DF esteja vazio
+            # Tenta separador alternativo se necessário
+            if df.shape[1] < 2:
+                df = pd.read_csv(filepath_to_load, sep=';')
+            
+            # Garante que as colunas existam
             if "Nome_do_PDF" not in df.columns: df["Nome_do_PDF"] = ""
             if "Nome_Padronizado" not in df.columns: df["Nome_Padronizado"] = ""
             
-            return df, None # Retorna o DataFrame e Nenhum erro
+            return df, None 
         except FileNotFoundError:
              return None, f"Erro Crítico: O arquivo de mapeamento não foi encontrado em '{filepath_to_load}'."
         except pd.errors.EmptyDataError:
-             # Se o arquivo estiver vazio, retorna um DataFrame com as colunas corretas
              return pd.DataFrame(columns=["Nome_do_PDF", "Nome_Padronizado"]), None
         except Exception as e:
             return None, f"Erro ao ler o arquivo de mapeamento como DataFrame: {e}"
 
     def save_mapping_from_df(self, dataframe):
         try:
-            # CORREÇÃO: Usava self.user_filepath que não existia. Corrigido para self.filepath
+            # Sempre salva com vírgula para manter padrão
             dataframe.to_csv(self.filepath, index=False)
             return True, "Mapeamento salvo com sucesso."
         except Exception as e:
