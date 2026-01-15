@@ -6,6 +6,7 @@ from PySide6.QtGui import QAction, QIcon, QPixmap, QPainter, QActionGroup
 from PySide6.QtCore import Qt, QSize
 from app.ui.consolidator_widget import ConsolidatorWidget
 from app.ui.grade_creator_widget import GradeCreatorWidget
+from app.ui.antenna_dashboard_widget import AntennaDashboardWidget
 
 
 class MainWindow(QMainWindow):
@@ -33,6 +34,13 @@ class MainWindow(QMainWindow):
         # Página 2: Nova ferramenta Criador de Grade
         self.grade_creator_page = GradeCreatorWidget()
         self.stacked_widget.addWidget(self.grade_creator_page)
+
+        # =======================================================
+        # == NOVO: Adicionando a página "Monitor de Antenas"   ==
+        # =======================================================
+        # Página 3: Dashboard de Antenas
+        self.antenna_dashboard_page = AntennaDashboardWidget()
+        self.stacked_widget.addWidget(self.antenna_dashboard_page)
 
         self.toolbar = QToolBar("Ferramentas")
         self.toolbar.setIconSize(QSize(32, 32))
@@ -79,6 +87,19 @@ class MainWindow(QMainWindow):
         action_grade_creator.setCheckable(True)
         action_group.addAction(action_grade_creator)
         self.toolbar.addAction(action_grade_creator)
+        # =======================================================
+
+        # =======================================================
+        # == NOVO: Botão Monitor de Antenas                    ==
+        # =======================================================
+        # Ação Monitor de Antenas
+        orange_square_icon = self._create_color_icon(Qt.GlobalColor.darkYellow)
+        action_antenna = QAction(orange_square_icon, "Monitor de Antenas", self)
+        action_antenna.setStatusTip("Gera dashboard PDF de cidades/antenas fora do ar.")
+        action_antenna.triggered.connect(lambda: self.stacked_widget.setCurrentIndex(3))
+        action_antenna.setCheckable(True)
+        action_group.addAction(action_antenna)
+        self.toolbar.addAction(action_antenna)
         # =======================================================
 
         # Inicia na página inicial

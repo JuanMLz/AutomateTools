@@ -88,3 +88,53 @@ class EpgGeneratorWorker(QThread):
             self.finished.emit(resultado)
         except Exception as e:
             self.finished.emit(f"Erro na thread de EPG: {e}")
+
+
+# ============================================================================
+# WORKER 5: Dashboard de Antenas (Monitor de cidades fora do ar)
+# ============================================================================
+class AntennaDashboardWorker(QThread):
+    # Retorna (success: bool, message: str)
+    finished = Signal(bool, str)
+
+    def __init__(self, xlsx_paths, output_path):
+        super().__init__()
+        # Aceita tanto string única quanto lista de arquivos
+        if isinstance(xlsx_paths, str):
+            self.xlsx_paths = [xlsx_paths]
+        else:
+            self.xlsx_paths = xlsx_paths
+        self.output_path = output_path
+
+    def run(self):
+        try:
+            from app.tasks.antenna_data_manager import antenna_manager
+            from app.tasks.dashboard_generator import generate_dashboard_pdf
+            
+            # 1. Carrega todas as planilhas organizadas por data
+            reports_by_date, error = antenna_manager.load_multiple_reports(self.xlsx_paths)
+            if error:
+                self.finished.emit(False, error)
+                return
+            
+            if not reports_by_date:
+                self.finished.emit(False, "Nenhum relatório carregado")
+                return
+            
+            # 2. Carrega base de cidades (opcional, para regiões)
+            df_database, _ = antenna_manager.load_cities_database()
+            
+            # 3. Processa dados da semana e calcula métricas
+            metrics, error = antenna_manager.process_weekly_data(reports_by_date, df_database)
+            if error:
+                self.finished.emit(False, error)
+                return
+            
+            # 4. Gera PDF com 3 páginas
+            success, message = generate_dashboard_pdf(metrics, self.output_path)
+            
+            self.finished.emit(success, message)
+            
+        except Exception as e:
+            import traceback
+            self.finished.emit(False, f"Erro no worker: {e}\n{traceback.format_exc()}")
