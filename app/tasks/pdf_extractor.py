@@ -59,8 +59,8 @@ def extract_and_clean_from_pdfs(pdf_paths):
     if error: return None, error
 
     # === CORREÇÃO 1: Limpa as chaves do mapeamento usando a função central ===
-    # Isso garante que se o mapeamento tiver "Nome " (com espaço), ele é limpo.
-    mapping_dict = {clean_program_name(k): v for k, v in raw_mapping.items()}
+    # Garante case-insensitivity lowercasing as chaves também.
+    mapping_dict = {clean_program_name(k).lower(): v for k, v in raw_mapping.items()}
 
     try:
         df_extracted = _extract_raw_data_from_pdfs(pdf_paths)
@@ -83,8 +83,10 @@ def extract_and_clean_from_pdfs(pdf_paths):
         # === CORREÇÃO 2: Limpa o nome bruto vindo do PDF usando a função central ===
         df_extracted['Programa_Bruto'] = df_extracted['Programa_Bruto'].apply(clean_program_name)
 
-        # Aplica Mapeamento
-        df_extracted['Programa_Padronizado'] = df_extracted['Programa_Bruto'].replace(mapping_dict)
+        # Aplica Mapeamento (Case Insensitive)
+        df_extracted['Programa_Padronizado'] = df_extracted['Programa_Bruto'].apply(
+            lambda x: mapping_dict.get(str(x).lower(), x)
+        )
         
         # Gera chave
         df_extracted['chave'] = df_extracted.apply(lambda row: get_weekday_key(row), axis=1)
@@ -111,15 +113,32 @@ def find_unmapped_programs(pdf_paths=None, df_extracted=None):
 
         if df_raw is None or df_raw.empty: return [], None
 
-        # Normaliza chaves para comparação
-        mapped_keys = {clean_program_name(k).lower() for k in mapping_dict.keys()}
+        # Normaliza chaves do DICIONÁRIO para o lookup case-insensitive
+        # Isso substitui o dicionário anterior pelo que tem chaves testáveis em minúsculo
+        safe_mapping_dict = {clean_program_name(k).lower(): v for k, v in mapping_dict.items()}
+        
+        from app.tasks.epg_database_manager import epg_manager, _normalize
+        epg_titles = epg_manager.get_title_to_id_map() # dict de títulos válidos no banco
         
         # Pega programas brutos e garante que estão limpos
         unique_raw = df_raw['Programa_Bruto'].apply(clean_program_name).unique()
         
-        # Verifica quais não estão no mapa
-        unmapped = [p for p in unique_raw if clean_program_name(p).lower() not in mapped_keys]
-        
+        # Verifica quais não estão no mapa ou mapeiam para algo inválido
+        unmapped = []
+        for p in unique_raw:
+            p_clean = clean_program_name(p)
+            p_key = p_clean.lower()
+            
+            if p_key not in safe_mapping_dict:
+                unmapped.append(p_clean)
+            else:
+                # O PDF tem mapeamento no DE-PARA. Mas o destino existe no EPG?
+                mapped_target = safe_mapping_dict.get(p_key)
+                if not mapped_target or _normalize(mapped_target) not in epg_titles:
+                    # Trata como não mapeado. Isso forçará a BatchMappingDialog a abrir,
+                    # e quando o usuário salvar o novo destino, sobrescreverá o antigo no CSV.
+                    unmapped.append(p_clean)
+                    
         return unmapped, None
 
     except Exception as e:

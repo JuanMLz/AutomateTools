@@ -4,7 +4,7 @@ import pandas as pd
 import os
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QWidget, 
-    QLabel, QLineEdit, QGroupBox, QMessageBox
+    QLabel, QLineEdit, QGroupBox, QMessageBox, QListWidget, QListView
 )
 from PySide6.QtCore import Qt
 
@@ -12,134 +12,227 @@ from PySide6.QtCore import Qt
 from app.tasks.mapping_manager import mapping_manager
 from app.tasks.schedule_processor import find_unmapped_programs
 from app.workers import GradeExtractionWorker, GradeComparisonWorker, EpgGeneratorWorker
-# Importe sua classe MappingEditorWidget do local correto (se for arquivo separado)
-# from app.ui.mapping_editor_widget import MappingEditorWidget 
 
 class GradeCreatorWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.selected_pdf_files = []
+        self.current_output_path = ""
+        self.current_anterior_path = ""
         
-        # Variáveis de estado
-        self.current_output_path = None
-        self.current_anterior_path = None
-        
-        # Layout Principal
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(20, 20, 20, 20)
+        self.layout.setSpacing(20)
         self.layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # --- Cabeçalho ---
-        header_layout = QHBoxLayout()
         title_label = QLabel("Painel de Controle de Grades")
-        title_label.setStyleSheet("font-size: 18px; font-weight: bold; margin-bottom: 10px;")
-        
-        self.settings_button = QPushButton("Gerenciar DE-PARA")
-        self.settings_button.setFixedSize(150, 30)
-        self.settings_button.clicked.connect(self._open_mapping_manager)
-        
-        header_layout.addWidget(title_label)
-        header_layout.addStretch()
-        header_layout.addWidget(self.settings_button)
-        self.layout.addLayout(header_layout)
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.layout.addWidget(title_label)
 
         # ============================================================
-        # BLOCO 1: EXTRAÇÃO & BASE (A Fonte da Verdade)
+        # SEÇÃO: ENTRADAS
         # ============================================================
-        group1 = QGroupBox("1. Extração de Dados (Base)")
-        group1.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #aaa; margin-top: 10px; padding-top: 15px; } QGroupBox::title { top: -8px; left: 10px; }")
-        layout1 = QVBoxLayout()
+        entrada_label = QLabel("ENTRADAS")
+        entrada_label.setStyleSheet("color: #888; font-size: 11px; font-weight: bold; letter-spacing: 1px;")
+        self.layout.addWidget(entrada_label)
+
+        entradas_layout = QHBoxLayout()
+        entradas_layout.setSpacing(15)
+
+        # Card PDFs
+        pdf_card = QWidget()
+        pdf_card.setStyleSheet("QWidget { background-color: #2a2a3e; border-radius: 8px; }")
+        pdf_layout = QVBoxLayout(pdf_card)
         
-        # Input PDF
-        pdf_layout = QHBoxLayout()
-        self.pdf_path_edit = QLineEdit("Nenhum PDF selecionado")
-        self.pdf_path_edit.setReadOnly(True)
-        select_pdf_btn = QPushButton("Selecionar PDFs da Semana...")
-        select_pdf_btn.clicked.connect(self._select_pdfs)
-        pdf_layout.addWidget(select_pdf_btn)
-        pdf_layout.addWidget(self.pdf_path_edit)
-        layout1.addLayout(pdf_layout)
+        lbl_pdf_title = QLabel("📄 PDFs da Semana")
+        lbl_pdf_title.setStyleSheet("color: white; font-weight: bold; font-size: 14px; background: transparent;")
+        pdf_layout.addWidget(lbl_pdf_title)
         
-        # Action 1
-        self.btn_simple = QPushButton("Gerar Planilha Simples")
-        self.btn_simple.setStyleSheet("padding: 6px; font-weight: bold;")
+        self.pdf_list = QListWidget()
+        self.pdf_list.setFlow(QListView.Flow.LeftToRight)
+        self.pdf_list.setWrapping(True)
+        self.pdf_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.pdf_list.setSpacing(5)
+        self.pdf_list.setMaximumHeight(80)
+        self.pdf_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; outline: none; }"
+            "QListWidget::item { background: #3a3a4e; color: white; border-radius: 12px; padding: 4px 8px; }"
+        )
+        pdf_layout.addWidget(self.pdf_list)
+
+        btn_sel_pdf = QPushButton("Selecionar PDFs")
+        btn_sel_pdf.setStyleSheet("QPushButton { border: 1px solid #3b82f6; color: #3b82f6; border-radius: 4px; padding: 6px; background: transparent; } QPushButton:hover { background: rgba(59, 130, 246, 0.1); }")
+        btn_sel_pdf.clicked.connect(self._select_pdfs)
+        pdf_layout.addWidget(btn_sel_pdf)
+        entradas_layout.addWidget(pdf_card)
+
+        # Card Grade Anterior
+        ant_card = QWidget()
+        ant_card.setStyleSheet("QWidget { background-color: #2a2a3e; border-radius: 8px; }")
+        ant_layout = QVBoxLayout(ant_card)
+        
+        lbl_ant_title = QLabel("📊 Grade Anterior")
+        lbl_ant_title.setStyleSheet("color: white; font-weight: bold; font-size: 14px; background: transparent;")
+        lbl_ant_sub = QLabel("(opcional — Grade Comparada)")
+        lbl_ant_sub.setStyleSheet("color: #888; font-size: 11px; background: transparent;")
+        ant_layout.addWidget(lbl_ant_title)
+        ant_layout.addWidget(lbl_ant_sub)
+        
+        self.ant_list = QListWidget()
+        self.ant_list.setFlow(QListView.Flow.LeftToRight)
+        self.ant_list.setWrapping(True)
+        self.ant_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.ant_list.setSpacing(5)
+        self.ant_list.setMaximumHeight(80)
+        self.ant_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; outline: none; }"
+            "QListWidget::item { background: #3a3a4e; color: white; border-radius: 12px; padding: 4px 8px; }"
+        )
+        ant_layout.addWidget(self.ant_list)
+
+        btn_sel_ant = QPushButton("Selecionar Excel")
+        btn_sel_ant.setStyleSheet("QPushButton { border: 1px solid #3b82f6; color: #3b82f6; border-radius: 4px; padding: 6px; background: transparent; } QPushButton:hover { background: rgba(59, 130, 246, 0.1); }")
+        btn_sel_ant.clicked.connect(self._select_anterior)
+        ant_layout.addWidget(btn_sel_ant)
+        entradas_layout.addWidget(ant_card)
+
+        self.layout.addLayout(entradas_layout)
+
+        # Linha divisória
+        div = QWidget()
+        div.setFixedHeight(1)
+        div.setStyleSheet("background-color: #444;")
+        self.layout.addWidget(div)
+
+        # ============================================================
+        # SEÇÃO: GERAR
+        # ============================================================
+        gerar_label = QLabel("GERAR")
+        gerar_label.setStyleSheet("color: #888; font-size: 11px; font-weight: bold; letter-spacing: 1px;")
+        self.layout.addWidget(gerar_label)
+
+        gerar_layout = QHBoxLayout()
+        gerar_layout.setSpacing(15)
+
+        # Btn 1
+        self.btn_simple = QPushButton("Planilha Simples\nRequer: PDFs")
+        self.btn_simple.setFixedHeight(60)
+        self.btn_simple.setStyleSheet("""
+            QPushButton { background-color: #2563eb; color: white; font-weight: bold; border-radius: 6px; }
+            QPushButton:disabled { background-color: #4b5563; color: #9ca3af; }
+        """)
         self.btn_simple.clicked.connect(self._run_simple_schedule)
-        layout1.addWidget(self.btn_simple)
-        
-        group1.setLayout(layout1)
-        self.layout.addWidget(group1)
+        gerar_layout.addWidget(self.btn_simple)
 
-        # ============================================================
-        # BLOCO 2: GRADE COMPARADA (Operacional)
-        # ============================================================
-        group2 = QGroupBox("2. Grade Comparada (Visual)")
-        group2.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #aaa; margin-top: 10px; padding-top: 15px; } QGroupBox::title { top: -8px; left: 10px; }")
-        layout2 = QVBoxLayout()
-        
-        # Input Grade Anterior
-        ant_layout = QHBoxLayout()
-        self.anterior_path_edit = QLineEdit("Nenhuma grade anterior selecionada")
-        self.anterior_path_edit.setReadOnly(True)
-        select_ant_btn = QPushButton("Selecionar Grade Anterior (Template)...")
-        select_ant_btn.clicked.connect(self._select_anterior)
-        ant_layout.addWidget(select_ant_btn)
-        ant_layout.addWidget(self.anterior_path_edit)
-        layout2.addLayout(ant_layout)
-        
-        # Action 2
-        self.btn_compare = QPushButton("Criar Nova Grade Comparada")
-        self.btn_compare.setStyleSheet("padding: 6px; font-weight: bold;")
+        # Btn 2
+        self.btn_compare = QPushButton("Grade Comparada\nRequer: PDFs + Grade Anterior")
+        self.btn_compare.setFixedHeight(60)
+        self.btn_compare.setStyleSheet("""
+            QPushButton { background-color: #2563eb; color: white; font-weight: bold; border-radius: 6px; }
+            QPushButton:disabled { background-color: #4b5563; color: #9ca3af; }
+        """)
         self.btn_compare.clicked.connect(self._run_comparison)
-        layout2.addWidget(self.btn_compare)
-        
-        group2.setLayout(layout2)
-        self.layout.addWidget(group2)
+        gerar_layout.addWidget(self.btn_compare)
 
-        # ============================================================
-        # BLOCO 3: EPG & DATABASE (Sistema)
-        # ============================================================
-        group3 = QGroupBox("3. EPG & Database")
-        group3.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #aaa; margin-top: 10px; padding-top: 15px; } QGroupBox::title { top: -8px; left: 10px; }")
-        layout3 = QVBoxLayout()
-        
-        info_label = QLabel("Este processo utiliza o Banco de Dados interno (epg_database.csv) para preencher as informações.")
-        info_label.setStyleSheet("color: #666; font-size: 11px; margin-bottom: 5px; font-style: italic;")
-        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout3.addWidget(info_label)
-        
-        # Action 3
-        self.btn_epg = QPushButton("Criar Novo Arquivo EPG")
-        self.btn_epg.setStyleSheet("padding: 6px; font-weight: bold;")
+        # Btn 3
+        self.btn_epg = QPushButton("Arquivo EPG\nRequer: PDFs")
+        self.btn_epg.setFixedHeight(60)
+        self.btn_epg.setStyleSheet("""
+            QPushButton { background-color: #2563eb; color: white; font-weight: bold; border-radius: 6px; }
+            QPushButton:disabled { background-color: #4b5563; color: #9ca3af; }
+        """)
         self.btn_epg.clicked.connect(self._run_epg)
-        layout3.addWidget(self.btn_epg)
-        
-        group3.setLayout(layout3)
-        self.layout.addWidget(group3)
+        gerar_layout.addWidget(self.btn_epg)
 
-        # --- Status ---
-        self.status_label = QLabel("Pronto.")
-        self.status_label.setStyleSheet("margin-top: 15px; font-size: 12px; color: green; font-weight: bold;")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.layout.addWidget(self.status_label)
+        self.layout.addLayout(gerar_layout)
         self.layout.addStretch()
+
+        # ============================================================
+        # RODAPÉ
+        # ============================================================
+        footer_layout = QHBoxLayout()
+        
+        self.btn_depara = QPushButton("Gerenciar DE-PARA")
+        self.btn_depara.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_depara.setStyleSheet("color: #aaa; background: transparent; border: none; text-decoration: underline;")
+        self.btn_depara.clicked.connect(self._open_mapping_manager)
+        
+        self.btn_sync_epg = QPushButton("Atualizar Banco EPG...")
+        self.btn_sync_epg.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_sync_epg.setStyleSheet("color: #aaa; background: transparent; border: none; text-decoration: underline;")
+        self.btn_sync_epg.clicked.connect(self._sync_epg_from_file)
+
+        lbl_dot = QLabel("•")
+        lbl_dot.setStyleSheet("color: #888;")
+
+        footer_layout.addWidget(self.btn_depara)
+        footer_layout.addWidget(lbl_dot)
+        footer_layout.addWidget(self.btn_sync_epg)
+        footer_layout.addStretch()
+
+        self.status_label = QLabel("Pronto para gerar.")
+        self.status_label.setStyleSheet("color: #4ade80; font-weight: bold; font-size: 12px;")
+        footer_layout.addWidget(self.status_label)
+
+        self.layout.addLayout(footer_layout)
+
+        self._update_button_states()
+
+    def _update_button_states(self):
+        has_pdf = len(self.selected_pdf_files) > 0
+        has_ant = self.current_anterior_path is not None
+
+        self.btn_simple.setEnabled(has_pdf)
+        self.btn_epg.setEnabled(has_pdf)
+        self.btn_compare.setEnabled(has_pdf and has_ant)
 
     # --- Funções Auxiliares de UI ---
     def _select_pdfs(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Selecione os PDFs", filter="Arquivos PDF (*.pdf)")
         if paths:
             self.selected_pdf_files = paths
-            self.pdf_path_edit.setText(f"{len(paths)} arquivos selecionados")
+            self.pdf_list.clear()
+            for p in paths:
+                self.pdf_list.addItem(f"📄 {os.path.basename(p)}")
+            self._update_button_states()
 
     def _select_anterior(self):
         path, _ = QFileDialog.getOpenFileName(self, "Selecione a Grade Anterior", filter="Excel (*.xlsx *.xls)")
         if path:
-            self.anterior_path_edit.setText(path)
+            self.current_anterior_path = path
+            self.ant_list.clear()
+            self.ant_list.addItem(f"📊 {os.path.basename(path)}")
+            self._update_button_states()
 
     def _open_mapping_manager(self):
-        # Importe aqui ou no topo
         from app.ui.mapping_editor_widget import MappingEditorWidget 
         editor = MappingEditorWidget() 
         editor.exec()
+
+    def _sync_epg_from_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Selecione o EPG preenchido", filter="Excel (*.xlsx)")
+        if path:
+            from app.tasks.epg_database_manager import epg_manager
+            summary, error = epg_manager.preview_sync(path)
+            if error:
+                QMessageBox.critical(self, "Erro na leitura", error)
+                return
+            
+            n_upd = len(summary['updated'])
+            n_add = len(summary['added'])
+            n_unc = len(summary['unchanged'])
+            
+            msg = f"Resumo da Atualização:\n\n"
+            msg += f"Atualizados: {n_upd}\nAdicionados: {n_add}\nSem alteração: {n_unc}\n\n"
+            msg += "Deseja aplicar estas alterações no banco de dados interno?"
+            
+            reply = QMessageBox.question(self, "Atualizar Banco EPG", msg)
+            if reply == QMessageBox.StandardButton.Yes:
+                success, msg_result = epg_manager.sync_from_epg_file(path)
+                if success:
+                    QMessageBox.information(self, "Sucesso", msg_result)
+                else:
+                    QMessageBox.critical(self, "Erro", msg_result)
 
     # ===================================================================
     # == FLUXO DE CONTROLE (Check de Mapeamento -> Execução)           ==
@@ -167,15 +260,13 @@ class GradeCreatorWidget(QWidget):
             self._unlock_ui()
             self.status_label.setText(f"Atenção: {len(unmapped)} novos programas.")
             
-            from app.ui.mapping_editor_widget import MappingEditorWidget 
-            editor = MappingEditorWidget(new_unmapped_list=unmapped)
+            from app.ui.batch_mapping_dialog import BatchMappingDialog 
+            editor = BatchMappingDialog(unmapped_list=unmapped)
             
             if editor.exec() == QDialog.DialogCode.Accepted:
                 self.status_label.setText("Mapeamento atualizado. Reiniciando...")
-                # Reinicia o fluxo
-                if run_mode == 'simple': self._run_simple_schedule()
-                elif run_mode == 'comparison': self._run_comparison()
-                elif run_mode == 'epg': self._run_epg()
+                # Reinicia o fluxo sem pedir o caminho do arquivo de novo
+                self._check_and_start_processing(run_mode)
             else:
                 self.status_label.setText("Mapeamento cancelado.")
         else:
@@ -215,7 +306,7 @@ class GradeCreatorWidget(QWidget):
         self._unlock_ui()
 
     def _run_comparison(self):
-        if "Nenhuma" in self.anterior_path_edit.text():
+        if not self.current_anterior_path:
             self.status_label.setText("Erro: Selecione a Grade Anterior no Bloco 2.")
             return
         
@@ -226,7 +317,7 @@ class GradeCreatorWidget(QWidget):
 
     def _start_comparison(self, df):
         self._lock_ui("Gerando Grade Comparada...")
-        self.comp_worker = GradeComparisonWorker(df, self.anterior_path_edit.text(), self.current_output_path)
+        self.comp_worker = GradeComparisonWorker(df, self.current_anterior_path, self.current_output_path)
         self.comp_worker.finished.connect(self._finish_task)
         self.comp_worker.start()
 

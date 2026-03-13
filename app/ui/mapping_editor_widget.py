@@ -120,6 +120,31 @@ class MappingEditorWidget(QDialog):
         Salva as alterações no arquivo CSV e fecha a janela.
         """
         new_data_df = self.model._data
+        
+        # Validação do DE-PARA contra o EPG Database
+        if not self.new_unmapped_list:
+            from app.tasks.epg_database_manager import epg_manager, _normalize
+            title_map = epg_manager.get_title_to_id_map()
+            
+            invalid_titles = []
+            for t in new_data_df['Nome_Padronizado'].dropna().astype(str):
+                t = t.strip()
+                if t and _normalize(t) not in title_map:
+                    invalid_titles.append(t)
+            
+            if invalid_titles:
+                invalid_unique = list(set(invalid_titles))
+                msg = f"Foram encontrados {len(invalid_unique)} nomes no DE-PARA que não batem com o Banco EPG (ex: '{invalid_unique[0]}').\n"
+                msg += "O 'Nome Padronizado' do Mapeamento deve ser exatamente um Título válido do EPG.\n\nDeseja cadastrá-los como NOVOS programas no banco agora?"
+                reply = QMessageBox.question(self, "Títulos Desconhecidos", msg)
+                if reply == QMessageBox.StandardButton.Yes:
+                    from app.ui.batch_mapping_dialog import NewProgramDialog
+                    for t in invalid_unique:
+                        dlg = NewProgramDialog(initial_title=t, parent=self)
+                        dlg.exec()
+                    return # Força o usuário a apertar salvar de novo para re-validar
+                else:
+                    return # Bloqueia o salvamento
 
         if self.new_unmapped_list:
             old_data_df, error = mapping_manager.load_mapping_as_df()
